@@ -80,16 +80,15 @@ All training is launched via `launch.sh <mode> <model_size> [steps] [nodes]`. Th
 
 **Single-GPU throughput baselines** (50 steps, SEQ_LEN=4096, TP=1, PP=1):
 
-| Model | MBS | TFLOP/s/GPU | MFU | tok/s/GPU |
-|-------|-----|-------------|-----|-----------|
-| 125m | 16 | 50 | 10% | 54,671 |
-| 350m | 8 | 159 | 32% | 62,711 |
-| 760m | 6 | 370 | 75% | 74,994 |
-| 1.5b | 4 | 346 | 70% | 34,054 |
-| 3b | 4 | 450 | 91% | 19,842 |
-| 8b | 2 | 504 | 102% | 10,882 |
+| Model | MBS | tok/s/GPU |
+|-------|-----|-----------|
+| 125m | 16 | 54,671 |
+| 350m | 8 | 62,711 |
+| 760m | 6 | 74,994 |
+| 1.5b | 4 | 34,054 |
+| 3b | 4 | 19,842 |
+| 8b | 2 | 10,882 |
 
-All use TransformerEngine, manual GC, and numactl memory binding. MFU computed against 494.7 TFLOP/s GH200 bf16 peak.
 
 ### Logging
 
