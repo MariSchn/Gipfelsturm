@@ -115,7 +115,7 @@ cat > "$SCRIPT" << 'HEADER'
 HEADER
 
 cat >> "$SCRIPT" << SBATCH_DIRECTIVES
-#SBATCH --account=infra01
+#SBATCH --account=lsaie-ss26
 #SBATCH --time=${TIME}
 #SBATCH --job-name=${JOB_NAME}
 #SBATCH --output=logs/%x-%j.log

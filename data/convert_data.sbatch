@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=parquet-to-megatron
-#SBATCH --account=infra01
+#SBATCH --account=lsaie-ss26
 #SBATCH --partition=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
