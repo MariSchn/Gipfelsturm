@@ -10,7 +10,7 @@
 #SBATCH --output=logs/%x-%j.log
 #SBATCH --error=logs/%x-%j.log
 
-WORKDIR=/users/schlag/gipfelsturm
+WORKDIR=~/gipfelsturm
 
 mkdir -p logs
 
