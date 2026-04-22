@@ -30,7 +30,7 @@ case $MODE in
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
         LOGGING_EXTRA=""
-        WANDB=false
+        WANDB=true
         ;;
     train)
         TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes]}
@@ -96,6 +96,7 @@ if [ -n "$WANDB_API_KEY" ]; then
     TRAINING_CMD="$TRAINING_CMD \
         --wandb-save-dir $LOG_DIR \
         --wandb-project $PROJECT_NAME \
+        --wandb-entity LSAIE \
         --wandb-exp-name $EXP_NAME-$SLURM_JOB_ID"
 else
     export WANDB_MODE=disabled
