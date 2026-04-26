@@ -31,7 +31,10 @@ case $MODE in
         EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
-        LOGGING_EXTRA=""
+        LOGGING_EXTRA="
+    --tensorboard-dir \$TENSORBOARD_DIR
+    --log-timers-to-tensorboard
+    --log-memory-to-tensorboard"
         WANDB=true
         ;;
     train)
