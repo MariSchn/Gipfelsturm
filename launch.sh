@@ -20,6 +20,8 @@ set -euo pipefail
 MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 
+SLURM_PARTITION="debug"
+
 ################ Mode config ################
 case $MODE in
     throughput)
@@ -127,6 +129,7 @@ cat >> "$SCRIPT" << SBATCH_DIRECTIVES
 #SBATCH --cpus-per-task=288
 #SBATCH --mem=460000
 #SBATCH --no-requeue
+${SLURM_PARTITION:+#SBATCH --partition=${SLURM_PARTITION}}
 SBATCH_DIRECTIVES
 
 cat >> "$SCRIPT" << 'BODY'
