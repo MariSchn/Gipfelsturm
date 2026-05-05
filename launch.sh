@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Usage: ./launch.sh <mode> <model_size> [steps] [nodes]
+# Usage: ./launch.sh <mode> <model_size> [steps] [nodes] [tp] [pp]
 #
 # Modes:     throughput  (50 steps, no logging)
 #            train       (N steps, with W&B and Tensorboard)
@@ -9,9 +9,12 @@
 #
 # Steps:     required for train mode (e.g., 1000, 5000, 15000)
 # Nodes:     optional, default 4 (max 8)
+# tp:        tensor-parallel degree, default 1 (keep <= 4 for NVLink locality)
+# pp:        pipeline-parallel degree, default 1
 #
 # Examples:  ./launch.sh throughput 760m
 #            ./launch.sh throughput 8b 50 1
+#            ./launch.sh throughput 8b 50 1 2 1
 #            ./launch.sh train 760m 5000
 #            ./launch.sh train 1.5b 3000 8
 
@@ -20,13 +23,18 @@ set -euo pipefail
 MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 
-SLURM_PARTITION="debug"
+# GPUs per node (default 4 = full GH200 node). Override for sub-node DP sweeps.
+GPUS_PER_NODE=${GPUS_PER_NODE:-4}
+
+SLURM_PARTITION="normal"
 
 ################ Mode config ################
 case $MODE in
     throughput)
         TRAINING_STEPS=${3:-50}
         NODES=${4:-4}
+        TP_SIZE=${5:-1}
+        PP_SIZE=${6:-1}
         TIME=00:30:00
         EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=0
@@ -40,6 +48,8 @@ case $MODE in
     train)
         TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes]}
         NODES=${4:-4}
+        TP_SIZE=${5:-1}
+        PP_SIZE=${6:-1}
         TIME=02:30:00
         EVAL_INTERVAL=1000
         EVAL_ITERS=10
@@ -88,9 +98,22 @@ case $MODEL_SIZE in
         ;;
 esac
 
-GBS=256
+# Global batch must satisfy: GBS % (MBS * DP) == 0, with DP = nodes*GPUS_PER_NODE/(TP*PP).
+BASE_GBS=256
+_NEED=$(( MBS * NODES * GPUS_PER_NODE / TP_SIZE / PP_SIZE ))
+if (( BASE_GBS % _NEED != 0 )); then
+    GBS=$(( ((BASE_GBS + _NEED - 1) / _NEED) * _NEED ))
+else
+    GBS=$BASE_GBS
+fi
 SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
+
+PARALLEL_SUFFIX=""
+if [ "${TP_SIZE}" -ne 1 ] || [ "${PP_SIZE}" -ne 1 ]; then
+    PARALLEL_SUFFIX="-tp${TP_SIZE}-pp${PP_SIZE}"
+fi
+DP_SIZE=$(( NODES * GPUS_PER_NODE / TP_SIZE / PP_SIZE ))
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-g${GPUS_PER_NODE}-dp${DP_SIZE}${PARALLEL_SUFFIX}"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -128,7 +151,7 @@ cat >> "$SCRIPT" << SBATCH_DIRECTIVES
 #SBATCH --error=logs/%x-%j.log
 #SBATCH --nodes=${NODES}
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=4
+#SBATCH --gpus-per-node=${GPUS_PER_NODE}
 #SBATCH --cpus-per-task=288
 #SBATCH --mem=460000
 #SBATCH --no-requeue
@@ -153,10 +176,12 @@ MBS=${MBS}
 GBS=${GBS}
 SEQ_LEN=${SEQ_LEN}
 TRAINING_STEPS=${TRAINING_STEPS}
+TP_SIZE=${TP_SIZE}
+PP_SIZE=${PP_SIZE}
 
 # Logging
 PROJECT_NAME=gipfelsturm
-EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n
+EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n-g${GPUS_PER_NODE}-dp${DP_SIZE}${PARALLEL_SUFFIX}
 LOG_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/\$PROJECT_NAME/\$EXP_NAME
 TENSORBOARD_DIR=\$LOG_DIR/tensorboard
 CONFIGS
@@ -250,8 +275,8 @@ MIXED_PRECISION_ARGS=(
 )
 
 DISTRIBUTED_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 1
+    --tensor-model-parallel-size ${TP_SIZE}
+    --pipeline-model-parallel-size ${PP_SIZE}
     --use-distributed-optimizer
     --overlap-grad-reduce
     --overlap-param-gather
