@@ -21,13 +21,66 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAUNCH="${SCRIPT_DIR}/../launch.sh"
 
 # Each entry: "DP NODES GPUS_PER_NODE"
-CONFIGS=(
-    "1  1 1"
-    "2  1 2"
-    "4  1 4"
-    "8  2 4"
-    "16 4 4"
-)
+case "$MODEL_SIZE" in
+    125m)
+        CONFIGS=(
+            "1  1 1"
+            "2  1 2"
+            "4  1 4"
+            "8  2 4"
+            "16 4 4"
+        )
+        ;;
+    350m)
+        CONFIGS=(
+            "1  1 1"
+            "2  1 2"
+            "4  1 4"
+            "8  2 4"
+            "16 4 4"
+        )
+        ;;
+    760m)
+        CONFIGS=(
+            "1  1 1"
+            "2  1 2"
+            "4  1 4"
+            "8  2 4"
+            "16 4 4"
+        )
+        ;;
+    1.5b)
+        CONFIGS=(
+            "1  1 1"
+            "2  1 2"
+            "4  1 4"
+            "8  2 4"
+            "16 4 4"
+        )
+        ;;
+    3b)
+        CONFIGS=(
+            # "1  1 1"  # OOMs, due to not sharding optimizer states
+            "2  1 2"
+            "4  1 4"
+            "8  2 4"
+            "16 4 4"
+        )
+        ;;
+    8b)
+        CONFIGS=(
+            # "1  1 1"  # OOMs, due to not sharding optimizer states
+            # "2  1 2"  # OOMs, due to not sharding optimizer states
+            "4  1 4"
+            "8  2 4"
+            "16 4 4"
+        )
+        ;;
+    *)
+        echo "Unknown model size: $MODEL_SIZE"
+        exit 1
+        ;;
+esac
 
 for cfg in "${CONFIGS[@]}"; do
     read -r DP NODES GPN <<< "$cfg"
