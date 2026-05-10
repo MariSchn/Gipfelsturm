@@ -90,7 +90,40 @@ esac
 
 GBS=256
 SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
+
+PROJECT_NAME=${PROJECT_NAME:-gipfelsturm}
+
+################ Architecture overrides (env vars) ################
+EP_SIZE=${EP_SIZE:-1}
+NUM_EXPERTS=${NUM_EXPERTS:-0}
+MOE_TOPK=${MOE_TOPK:-2}
+
+MOE_SUFFIX=""
+if [ "${NUM_EXPERTS}" -gt 0 ]; then
+    MOE_SUFFIX="-moe${NUM_EXPERTS}top${MOE_TOPK}ep${EP_SIZE}"
+fi
+
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n${MOE_SUFFIX}"
+
+# Injected into the generated script verbatim
+DIST_EP_BLOCK="
+DISTRIBUTED_ARGS+=(
+    --expert-model-parallel-size ${EP_SIZE}
+)"
+
+if [ "${NUM_EXPERTS}" -gt 0 ]; then
+    MOE_ARGS_BLOCK="
+MOE_ARGS=(
+    --num-experts ${NUM_EXPERTS}
+    --moe-router-topk ${MOE_TOPK}
+    --moe-aux-loss-coeff 0.01
+    --moe-grouped-gemm
+    --moe-token-dispatcher-type alltoall
+)"
+else
+    MOE_ARGS_BLOCK="
+MOE_ARGS=()"
+fi
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -155,8 +188,8 @@ SEQ_LEN=${SEQ_LEN}
 TRAINING_STEPS=${TRAINING_STEPS}
 
 # Logging
-PROJECT_NAME=gipfelsturm
-EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n
+PROJECT_NAME=${PROJECT_NAME}
+EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n${MOE_SUFFIX}
 LOG_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/\$PROJECT_NAME/\$EXP_NAME
 TENSORBOARD_DIR=\$LOG_DIR/tensorboard
 CONFIGS
@@ -267,6 +300,11 @@ ${LOGGING_EXTRA}
 )
 LOGGING_EXTRA
 
+cat >> "$SCRIPT" << ARCH_INSERT
+${DIST_EP_BLOCK}
+${MOE_ARGS_BLOCK}
+ARCH_INSERT
+
 cat >> "$SCRIPT" << 'TOKENIZER'
 
 TOKENIZER_ARGS=(
@@ -300,6 +338,7 @@ TRAINING_CMD="torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \
     ${INITIALIZATION_ARGS[@]} \
     ${MIXED_PRECISION_ARGS[@]} \
     ${DISTRIBUTED_ARGS[@]} \
+    ${MOE_ARGS[@]} \
     ${LOGGING_ARGS[@]} \
     ${TOKENIZER_ARGS[@]} \
     ${DATA_ARGS[@]}"
