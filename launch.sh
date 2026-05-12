@@ -25,7 +25,7 @@ MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 
 # GPUs per node (default 4 = full GH200 node). Override for sub-node DP sweeps.
 GPUS_PER_NODE=${GPUS_PER_NODE:-4}
-
+DATA_NUM_WORKERS=${DATA_NUM_WORKERS:-1}
 SLURM_PARTITION="normal"
 
 ################ Mode config ################
@@ -113,7 +113,7 @@ if [ "${TP_SIZE}" -ne 1 ] || [ "${PP_SIZE}" -ne 1 ]; then
     PARALLEL_SUFFIX="-tp${TP_SIZE}-pp${PP_SIZE}"
 fi
 DP_SIZE=$(( NODES * GPUS_PER_NODE / TP_SIZE / PP_SIZE ))
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-g${GPUS_PER_NODE}-dp${DP_SIZE}${PARALLEL_SUFFIX}"
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-g${GPUS_PER_NODE}-dp${DP_SIZE}${PARALLEL_SUFFIX}-w${DATA_NUM_WORKERS}"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -304,8 +304,14 @@ DATA_ARGS=(
     --data-path $DATA_PREFIX
     --data-cache-path $DATASET_CACHE_DIR
     --split 99,1,0
-    --num-workers 1
+TOKENIZER
+
+cat >> "$SCRIPT" << DATA_WORKERS
+    --num-workers ${DATA_NUM_WORKERS}
 )
+DATA_WORKERS
+
+cat >> "$SCRIPT" << 'TOKENIZER'
 
 TORCHRUN_ARGS=(
     --nproc-per-node $SLURM_GPUS_PER_NODE
