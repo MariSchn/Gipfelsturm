@@ -25,7 +25,7 @@ MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 
 # GPUs per node (default 4 = full GH200 node). Override for sub-node DP sweeps.
 GPUS_PER_NODE=${GPUS_PER_NODE:-4}
-DATA_NUM_WORKERS=${DATA_NUM_WORKERS:-1}
+DATA_NUM_WORKERS=${DATA_NUM_WORKERS:-32}
 SLURM_PARTITION="normal"
 
 ################ Mode config ################
