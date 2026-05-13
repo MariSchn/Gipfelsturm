@@ -191,7 +191,9 @@ if [ "${TRANSFORMER_IMPL}" = "local" ]; then
 cat >> "$SCRIPT" << 'TE_ARGS'
 TRANSFORMER_ENGINE_ARGS=(
     --transformer-impl local
+    --no-persist-layer-norm
 )
+
 
 TE_ARGS
 else
