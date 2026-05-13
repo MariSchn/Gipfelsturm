@@ -1,2 +1,5 @@
 logs/
 data/climbmix_small/
+*.csv
+*.DS_Store
+*.pdf
