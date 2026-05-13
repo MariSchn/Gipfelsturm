@@ -10,8 +10,13 @@
 # Steps:     required for train mode (e.g., 1000, 5000, 15000)
 # Nodes:     optional, default 4 (max 8)
 #
+# Env vars:  TRANSFORMER_IMPL=local  (default: transformer_engine)
+#            Use 'local' to activate custom attention patches (linear, mamba, xlstm).
+#            The local spec routes through get_gpt_layer_local_spec() in Megatron.
+#
 # Examples:  ./launch.sh throughput 760m
 #            ./launch.sh throughput 8b 50 1
+#            TRANSFORMER_IMPL=local ./launch.sh throughput 125m 20 1
 #            ./launch.sh train 760m 5000
 #            ./launch.sh train 1.5b 3000 8
 
@@ -21,6 +26,7 @@ MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 
 SLURM_PARTITION="debug"
+TRANSFORMER_IMPL="${TRANSFORMER_IMPL:-transformer_engine}"
 
 ################ Mode config ################
 case $MODE in
@@ -179,13 +185,25 @@ export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
 MASTER_ADDR=$(hostname)
 MASTER_PORT=25678
 
+SETUP
+
+if [ "${TRANSFORMER_IMPL}" = "local" ]; then
+cat >> "$SCRIPT" << 'TE_ARGS'
+TRANSFORMER_ENGINE_ARGS=(
+    --transformer-impl local
+)
+
+TE_ARGS
+else
+cat >> "$SCRIPT" << 'TE_ARGS'
 TRANSFORMER_ENGINE_ARGS=(
     --transformer-impl transformer_engine
     --use-precision-aware-optimizer
     --main-grads-dtype bf16
 )
 
-SETUP
+TE_ARGS
+fi
 
 cat >> "$SCRIPT" << MODEL
 NETWORK_SIZE_ARGS=(

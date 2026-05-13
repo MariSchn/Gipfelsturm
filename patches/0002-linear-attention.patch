@@ -1,0 +1,129 @@
+# Patch: O(T) Linear Attention replacing DotProductAttention
+#
+# Problem:
+#   Standard DotProductAttention builds a T×T attention score matrix (O(T²) memory
+#   and compute w.r.t. sequence length), which limits throughput at SEQ_LEN=4096.
+#
+# What this patch does:
+#   Adds LinearAttentionCore in megatron/core/transformer/linear_attention.py.
+#   Uses the kernel trick phi(Q)(phi(K)^T V) with phi(x)=elu(x)+1, replacing the
+#   T×T score matrix with a d×d KV accumulator (O(T*d^2) compute and O(d^2) memory).
+#   Registers LinearAttentionCore as core_attention in get_gpt_layer_local_spec().
+#
+# How to activate:
+#   Ensure this patch is in patches/ (applied automatically by launch.sh).
+#   Run with TRANSFORMER_IMPL=local so the local spec path is used:
+#     TRANSFORMER_IMPL=local ./launch.sh throughput 125m 20 1
+#
+# Note: this is the non-causal (bidirectional) variant, suited for throughput
+# benchmarking (Phase 2). For loss quality experiments (Phase 4) a causal
+# prefix-sum version or the flash-linear-attention library is needed.
+#
+# Applied to: Megatron-LM core_v0.16.1
+#
+diff --git a/megatron/core/transformer/linear_attention.py b/megatron/core/transformer/linear_attention.py
+new file mode 100644
+--- /dev/null
++++ b/megatron/core/transformer/linear_attention.py
+@@ -0,0 +1,81 @@
++# Copyright (c) 2026 LSAIE Course Project. All rights reserved.
++
++from typing import Optional
++
++import torch
++import torch.nn as nn
++
++from megatron.core.transformer.enums import AttnMaskType
++from megatron.core.transformer.transformer_config import TransformerConfig
++
++
++class LinearAttentionCore(nn.Module):
++    """O(T) replacement for DotProductAttention using the kernel trick.
++
++    Replaces softmax(QK^T/sqrt(d))V with phi(Q)(phi(K)^T V) where phi(x)=elu(x)+1.
++    The global KV accumulator (d x d matrix) is computed once and reused for all
++    query positions, giving O(T*d^2) compute vs O(T^2*d) for softmax attention.
++
++    Note: non-causal (bidirectional) variant -- suitable for throughput benchmarking.
++    For language modelling quality experiments a causal prefix-sum version or the
++    flash-linear-attention library is needed.
++
++    Inputs/outputs follow DotProductAttention:
++      query/key/value: [seq, batch, heads_per_partition, head_dim]
++      returns:         [seq, batch, hidden_per_partition]
++    """
++
++    def __init__(
++        self,
++        config: TransformerConfig,
++        layer_number: int,
++        attn_mask_type: AttnMaskType,
++        attention_type: str,
++        cp_comm_type: Optional[str] = None,
++        softmax_scale: Optional[float] = None,
++        pg_collection=None,
++    ):
++        super().__init__()
++        self.config = config
++
++    def forward(
++        self,
++        query: torch.Tensor,
++        key: torch.Tensor,
++        value: torch.Tensor,
++        attention_mask: Optional[torch.Tensor],
++        /,
++        *,
++        attn_mask_type: AttnMaskType,
++        attention_bias: Optional[torch.Tensor] = None,
++        packed_seq_params=None,
++    ) -> torch.Tensor:
++        sq, b, np_heads, hn = query.shape
++
++        # GQA: expand KV heads to match query head count
++        if key.shape[2] < np_heads:
++            repeat = np_heads // key.shape[2]
++            key = key.repeat_interleave(repeat, dim=2)
++            value = value.repeat_interleave(repeat, dim=2)
++
++        # Feature map phi(x) = elu(x) + 1  (positive, avoids zero denominator)
++        q = torch.nn.functional.elu(query) + 1   # [sq, b, np, hn]
++        k = torch.nn.functional.elu(key) + 1     # [sq, b, np, hn]
++
++        # KV accumulator: sum_s phi(k_s) outer v_s  ->  [b, np, hn, hn]
++        kv = torch.einsum('tbhd,tbhe->bhde', k, value)
++
++        # K sum (normaliser denominator): sum_s phi(k_s)  ->  [b, np, hn]
++        z = k.sum(dim=0)
++
++        # Numerator: phi(q_t) . KV  ->  [sq, b, np, hn]
++        numerator = torch.einsum('tbhd,bhde->tbhe', q, kv)
++
++        # Denominator: phi(q_t) . z  ->  [sq, b, np, 1]
++        denominator = (
++            torch.einsum('tbhd,bhd->tbh', q, z)
++            .unsqueeze(-1)
++            .clamp(min=1e-6)
++        )
++
++        return (numerator / denominator).reshape(sq, b, np_heads * hn)
+diff --git a/megatron/core/models/gpt/gpt_layer_specs.py b/megatron/core/models/gpt/gpt_layer_specs.py
+--- a/megatron/core/models/gpt/gpt_layer_specs.py
++++ b/megatron/core/models/gpt/gpt_layer_specs.py
+@@ -11,6 +11,7 @@
+ )
+ from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec_for_backend
+ from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
++from megatron.core.transformer.linear_attention import LinearAttentionCore
+ from megatron.core.transformer.enums import AttnMaskType, LayerType
+ from megatron.core.transformer.identity_op import IdentityOp
+ from megatron.core.transformer.mlp import MLP, MLPSubmodules
+@@ -400,7 +401,7 @@
+                     params={"attn_mask_type": AttnMaskType.causal},
+                     submodules=SelfAttentionSubmodules(
+                         linear_qkv=backend.column_parallel_linear(),
+-                        core_attention=backend.core_attention(),
++                        core_attention=LinearAttentionCore,
+                         linear_proj=backend.row_parallel_linear(),
+                         q_layernorm=(
+                             L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
