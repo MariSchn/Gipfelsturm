@@ -86,13 +86,16 @@ case $MODEL_SIZE in
         ;;
     8b)
         NUM_LAYERS=32; HIDDEN=4096; FFN=14336; HEADS=32; KV_HEADS=8
-        if [ "${TRANSFORMER_IMPL}" = "local" ]; then MBS=1; else MBS=2; fi
+        MBS=2
         ;;
     *)
         echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b"
         exit 1
         ;;
 esac
+
+# Local impl materialises more intermediate tensors; halve MBS to avoid OOM
+if [ "${TRANSFORMER_IMPL}" = "local" ]; then MBS=$((MBS / 2 > 0 ? MBS / 2 : 1)); fi
 
 GBS=256
 SEQ_LEN=4096
