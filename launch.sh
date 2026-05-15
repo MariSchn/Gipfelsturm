@@ -97,6 +97,12 @@ esac
 # Local impl materialises more intermediate tensors; halve MBS to avoid OOM
 if [ "${TRANSFORMER_IMPL}" = "local" ]; then MBS=$((MBS / 2 > 0 ? MBS / 2 : 1)); fi
 
+# Tensor / pipeline parallelism (can be overridden via env vars)
+TP=${TP:-1}
+PP=${PP:-1}
+# 8B with local impl needs TP=4 to fit in 95 GB per GPU
+if [ "${MODEL_SIZE}" = "8b" ] && [ "${TRANSFORMER_IMPL}" = "local" ]; then TP=4; fi
+
 GBS=256
 SEQ_LEN=4096
 JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
@@ -272,13 +278,21 @@ MIXED_PRECISION_ARGS=(
     --bf16
 )
 
+REST
+
+cat >> "$SCRIPT" << DISTRIB
+
 DISTRIBUTED_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 1
+    --tensor-model-parallel-size ${TP}
+    --pipeline-model-parallel-size ${PP}
     --use-distributed-optimizer
     --overlap-grad-reduce
     --overlap-param-gather
 )
+
+DISTRIB
+
+cat >> "$SCRIPT" << 'REST'
 
 LOGGING_ARGS=(
     --log-throughput
