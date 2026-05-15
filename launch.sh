@@ -25,7 +25,7 @@ set -euo pipefail
 MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 
-SLURM_PARTITION="debug"
+SLURM_PARTITION="${PARTITION:-debug}"
 TRANSFORMER_IMPL="${TRANSFORMER_IMPL:-transformer_engine}"
 
 ################ Mode config ################
@@ -62,6 +62,14 @@ case $MODE in
         ;;
 esac
 
+# Non-debug partitions allow longer jobs
+if [ "${SLURM_PARTITION}" != "debug" ]; then
+    case $MODE in
+        throughput) TIME=01:30:00 ;;
+        train)      TIME=06:00:00 ;;
+    esac
+fi
+
 ################ Model config ################
 case $MODEL_SIZE in
     125m)
@@ -88,8 +96,12 @@ case $MODEL_SIZE in
         NUM_LAYERS=32; HIDDEN=4096; FFN=14336; HEADS=32; KV_HEADS=8
         MBS=2
         ;;
+    22b)
+        NUM_LAYERS=40; HIDDEN=6144; FFN=24576; HEADS=48; KV_HEADS=8
+        MBS=1
+        ;;
     *)
-        echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b"
+        echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b, 22b"
         exit 1
         ;;
 esac
@@ -102,6 +114,8 @@ TP=${TP:-1}
 PP=${PP:-1}
 # 8B with local impl needs TP=4 to fit in 95 GB per GPU
 if [ "${MODEL_SIZE}" = "8b" ] && [ "${TRANSFORMER_IMPL}" = "local" ]; then TP=4; fi
+# 22B always needs TP=4 (too large for single GPU)
+if [ "${MODEL_SIZE}" = "22b" ]; then TP=4; fi
 
 GBS=256
 SEQ_LEN=4096
