@@ -10,10 +10,18 @@
 # Steps:     required for train mode (e.g., 1000, 5000, 15000)
 # Nodes:     optional, default 4 (max 8)
 #
+# Env vars:
+#   Config 1 – Dense:           (nothing)
+#   Config 2 – Mixtral:         NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=X
+#   Config 3 – Compute-matched: NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=X FINE_GRAINED=1
+#   Config 4 – Shared expert:   NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=X FINE_GRAINED=1 SHARED_EXPERT=1
+#   Fine-grained Qwen3:         NUM_EXPERTS=128 MOE_TOPK=8 EP_SIZE=16 FINE_GRAINED=1
+#   Direct override:            MOE_FFN_HIDDEN_SIZE=N  MOE_SHARED_EXPERT_FFN=N
+#
 # Examples:  ./launch.sh throughput 760m
-#            ./launch.sh throughput 8b 50 1
-#            ./launch.sh train 760m 5000
-#            ./launch.sh train 1.5b 3000 8
+#            NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=4 ./launch.sh throughput 760m 50 1
+#            NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=4 FINE_GRAINED=1 SHARED_EXPERT=1 ./launch.sh throughput 760m 50 1
+#            ./launch.sh train 3b 3500 8
 
 set -euo pipefail
 
@@ -94,13 +102,40 @@ SEQ_LEN=4096
 PROJECT_NAME=${PROJECT_NAME:-gipfelsturm}
 
 ################ Architecture overrides (env vars) ################
+# Config 1 – Dense:          (no env vars needed)
+# Config 2 – Mixtral:        NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=X
+#               Each expert keeps the full FFN size → active FLOPs = K × dense = 2×.
+# Config 3 – Compute-matched: NUM_EXPERTS=8 MOE_TOPK=2 FINE_GRAINED=1 EP_SIZE=X
+#               expert_ffn = FFN/K so K × expert_ffn = dense FFN (identical FLOPs,
+#               E× more total capacity).
+# Config 4 – Shared-expert:  NUM_EXPERTS=8 MOE_TOPK=2 FINE_GRAINED=1 SHARED_EXPERT=1 EP_SIZE=X
+#               Adds 1 always-active shared expert (same FFN size as routed experts).
+#               Active FLOPs ≈ 1.5× dense. Mirrors DeepSeekMoE / Qwen3-Next design.
 EP_SIZE=${EP_SIZE:-1}
 NUM_EXPERTS=${NUM_EXPERTS:-0}
 MOE_TOPK=${MOE_TOPK:-2}
+FINE_GRAINED=${FINE_GRAINED:-0}
+MOE_FFN_HIDDEN_SIZE=${MOE_FFN_HIDDEN_SIZE:-0}
+SHARED_EXPERT=${SHARED_EXPERT:-0}
+MOE_SHARED_EXPERT_FFN=${MOE_SHARED_EXPERT_FFN:-0}
+
+if [ "${FINE_GRAINED}" -eq 1 ] && [ "${NUM_EXPERTS}" -gt 0 ]; then
+    MOE_FFN_HIDDEN_SIZE=$(( FFN / MOE_TOPK ))
+fi
+# Shared expert defaults to the same size as each routed expert (or full FFN if not fine-grained)
+if [ "${SHARED_EXPERT}" -eq 1 ] && [ "${NUM_EXPERTS}" -gt 0 ]; then
+    if [ "${MOE_FFN_HIDDEN_SIZE}" -gt 0 ]; then
+        MOE_SHARED_EXPERT_FFN=${MOE_FFN_HIDDEN_SIZE}
+    else
+        MOE_SHARED_EXPERT_FFN=${FFN}
+    fi
+fi
 
 MOE_SUFFIX=""
 if [ "${NUM_EXPERTS}" -gt 0 ]; then
     MOE_SUFFIX="-moe${NUM_EXPERTS}top${MOE_TOPK}ep${EP_SIZE}"
+    [ "${MOE_FFN_HIDDEN_SIZE}" -gt 0 ] && MOE_SUFFIX="${MOE_SUFFIX}-fg${MOE_FFN_HIDDEN_SIZE}"
+    [ "${MOE_SHARED_EXPERT_FFN}" -gt 0 ] && MOE_SUFFIX="${MOE_SUFFIX}-se"
 fi
 
 JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n${MOE_SUFFIX}"
@@ -112,13 +147,23 @@ DISTRIBUTED_ARGS+=(
 )"
 
 if [ "${NUM_EXPERTS}" -gt 0 ]; then
+    _FFN_LINE=""
+    [ "${MOE_FFN_HIDDEN_SIZE}" -gt 0 ] && _FFN_LINE="
+    --moe-ffn-hidden-size ${MOE_FFN_HIDDEN_SIZE}"
+    # topk=1 (Switch-style) requires pre-softmax routing; topk>1 uses the default post-softmax
+    _PRESOFTMAX_LINE=""
+    [ "${MOE_TOPK}" -eq 1 ] && _PRESOFTMAX_LINE="
+    --moe-router-pre-softmax"
+    _SHARED_LINE=""
+    [ "${MOE_SHARED_EXPERT_FFN}" -gt 0 ] && _SHARED_LINE="
+    --moe-shared-expert-intermediate-size ${MOE_SHARED_EXPERT_FFN}"
     MOE_ARGS_BLOCK="
 MOE_ARGS=(
     --num-experts ${NUM_EXPERTS}
     --moe-router-topk ${MOE_TOPK}
     --moe-aux-loss-coeff 0.01
     --moe-grouped-gemm
-    --moe-token-dispatcher-type alltoall
+    --moe-token-dispatcher-type alltoall${_PRESOFTMAX_LINE}${_FFN_LINE}${_SHARED_LINE}
 )"
 else
     MOE_ARGS_BLOCK="
@@ -206,6 +251,7 @@ export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TRITON_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/.triton_cache
 export TORCHINDUCTOR_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/.inductor_cache
 export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
