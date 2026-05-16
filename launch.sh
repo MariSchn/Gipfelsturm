@@ -15,12 +15,15 @@
 #   Config 2 – Mixtral:         NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=X
 #   Config 3 – Compute-matched: NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=X FINE_GRAINED=1
 #   Config 4 – Shared expert:   NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=X FINE_GRAINED=1 SHARED_EXPERT=1
-#   Fine-grained Qwen3:         NUM_EXPERTS=128 MOE_TOPK=8 EP_SIZE=16 FINE_GRAINED=1
-#   Direct override:            MOE_FFN_HIDDEN_SIZE=N  MOE_SHARED_EXPERT_FFN=N
+#   Direct FFN size:            MOE_FFN=N  (overrides FINE_GRAINED; e.g. MOE_FFN=2048)
+#   Sparse layers:              MOE_LAYER_FREQ=2  (every 2nd layer MoE, rest dense FFN)
+#   Load balancing:             MOE_AUX_LOSS_COEFF=0.01  (default; set 0 to disable)
+#   Shared expert FFN:          MOE_SHARED_EXPERT_FFN=N
 #
 # Examples:  ./launch.sh throughput 760m
 #            NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=4 ./launch.sh throughput 760m 50 1
-#            NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=4 FINE_GRAINED=1 SHARED_EXPERT=1 ./launch.sh throughput 760m 50 1
+#            NUM_EXPERTS=64 MOE_TOPK=4 EP_SIZE=4 MOE_FFN=2048 ./launch.sh throughput 3b 100 4
+#            NUM_EXPERTS=64 MOE_TOPK=4 EP_SIZE=4 MOE_FFN=2048 MOE_LAYER_FREQ=2 ./launch.sh throughput 3b 100 4
 #            ./launch.sh train 3b 3500 8
 
 set -euo pipefail
@@ -28,7 +31,7 @@ set -euo pipefail
 MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 
-SLURM_PARTITION="debug"
+SLURM_PARTITION=${SLURM_PARTITION-normal}
 
 ################ Mode config ################
 case $MODE in
@@ -102,30 +105,26 @@ SEQ_LEN=4096
 PROJECT_NAME=${PROJECT_NAME:-gipfelsturm}
 
 ################ Architecture overrides (env vars) ################
-# Config 1 – Dense:          (no env vars needed)
-# Config 2 – Mixtral:        NUM_EXPERTS=8 MOE_TOPK=2 EP_SIZE=X
-#               Each expert keeps the full FFN size → active FLOPs = K × dense = 2×.
-# Config 3 – Compute-matched: NUM_EXPERTS=8 MOE_TOPK=2 FINE_GRAINED=1 EP_SIZE=X
-#               expert_ffn = FFN/K so K × expert_ffn = dense FFN (identical FLOPs,
-#               E× more total capacity).
-# Config 4 – Shared-expert:  NUM_EXPERTS=8 MOE_TOPK=2 FINE_GRAINED=1 SHARED_EXPERT=1 EP_SIZE=X
-#               Adds 1 always-active shared expert (same FFN size as routed experts).
-#               Active FLOPs ≈ 1.5× dense. Mirrors DeepSeekMoE / Qwen3-Next design.
 EP_SIZE=${EP_SIZE:-1}
 NUM_EXPERTS=${NUM_EXPERTS:-0}
 MOE_TOPK=${MOE_TOPK:-2}
 FINE_GRAINED=${FINE_GRAINED:-0}
-MOE_FFN_HIDDEN_SIZE=${MOE_FFN_HIDDEN_SIZE:-0}
+# MOE_FFN: expert FFN hidden size. Set directly (e.g. MOE_FFN=2048) or via FINE_GRAINED=1
+# which computes FFN/TOPK automatically. Direct value takes precedence.
+MOE_FFN=${MOE_FFN:-${MOE_FFN_HIDDEN_SIZE:-0}}
 SHARED_EXPERT=${SHARED_EXPERT:-0}
 MOE_SHARED_EXPERT_FFN=${MOE_SHARED_EXPERT_FFN:-0}
+# MOE_LAYER_FREQ: 1 = every layer is MoE (default), N = every Nth layer is MoE
+MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-1}
+MOE_AUX_LOSS_COEFF=${MOE_AUX_LOSS_COEFF:-0.01}
 
-if [ "${FINE_GRAINED}" -eq 1 ] && [ "${NUM_EXPERTS}" -gt 0 ]; then
-    MOE_FFN_HIDDEN_SIZE=$(( FFN / MOE_TOPK ))
+if [ "${FINE_GRAINED}" -eq 1 ] && [ "${NUM_EXPERTS}" -gt 0 ] && [ "${MOE_FFN}" -eq 0 ]; then
+    MOE_FFN=$(( FFN / MOE_TOPK ))
 fi
-# Shared expert defaults to the same size as each routed expert (or full FFN if not fine-grained)
-if [ "${SHARED_EXPERT}" -eq 1 ] && [ "${NUM_EXPERTS}" -gt 0 ]; then
-    if [ "${MOE_FFN_HIDDEN_SIZE}" -gt 0 ]; then
-        MOE_SHARED_EXPERT_FFN=${MOE_FFN_HIDDEN_SIZE}
+# Shared expert defaults to same size as each routed expert (or full dense FFN if not fine-grained)
+if [ "${SHARED_EXPERT}" -eq 1 ] && [ "${NUM_EXPERTS}" -gt 0 ] && [ "${MOE_SHARED_EXPERT_FFN}" -eq 0 ]; then
+    if [ "${MOE_FFN}" -gt 0 ]; then
+        MOE_SHARED_EXPERT_FFN=${MOE_FFN}
     else
         MOE_SHARED_EXPERT_FFN=${FFN}
     fi
@@ -134,11 +133,12 @@ fi
 MOE_SUFFIX=""
 if [ "${NUM_EXPERTS}" -gt 0 ]; then
     MOE_SUFFIX="-moe${NUM_EXPERTS}top${MOE_TOPK}ep${EP_SIZE}"
-    [ "${MOE_FFN_HIDDEN_SIZE}" -gt 0 ] && MOE_SUFFIX="${MOE_SUFFIX}-fg${MOE_FFN_HIDDEN_SIZE}"
+    [ "${MOE_FFN}" -gt 0 ]               && MOE_SUFFIX="${MOE_SUFFIX}-ffn${MOE_FFN}"
     [ "${MOE_SHARED_EXPERT_FFN}" -gt 0 ] && MOE_SUFFIX="${MOE_SUFFIX}-se"
+    [ "${MOE_LAYER_FREQ}" -gt 1 ]        && MOE_SUFFIX="${MOE_SUFFIX}-lf${MOE_LAYER_FREQ}"
 fi
 
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n${MOE_SUFFIX}"
+JOB_NAME="${PROJECT_NAME}-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n${MOE_SUFFIX}"
 
 # Injected into the generated script verbatim
 DIST_EP_BLOCK="
@@ -148,22 +148,27 @@ DISTRIBUTED_ARGS+=(
 
 if [ "${NUM_EXPERTS}" -gt 0 ]; then
     _FFN_LINE=""
-    [ "${MOE_FFN_HIDDEN_SIZE}" -gt 0 ] && _FFN_LINE="
-    --moe-ffn-hidden-size ${MOE_FFN_HIDDEN_SIZE}"
-    # topk=1 (Switch-style) requires pre-softmax routing; topk>1 uses the default post-softmax
+    [ "${MOE_FFN}" -gt 0 ] && _FFN_LINE="
+    --moe-ffn-hidden-size ${MOE_FFN}"
+    # topk=1 (Switch-style) requires pre-softmax routing; topk>1 uses default post-softmax
     _PRESOFTMAX_LINE=""
     [ "${MOE_TOPK}" -eq 1 ] && _PRESOFTMAX_LINE="
     --moe-router-pre-softmax"
     _SHARED_LINE=""
     [ "${MOE_SHARED_EXPERT_FFN}" -gt 0 ] && _SHARED_LINE="
     --moe-shared-expert-intermediate-size ${MOE_SHARED_EXPERT_FFN}"
+    # --moe-layer-freq N: every Nth layer is MoE, others use dense FFN
+    # Verify this flag exists in your Megatron-Core version before use.
+    _LAYERFREQ_LINE=""
+    [ "${MOE_LAYER_FREQ}" -gt 1 ] && _LAYERFREQ_LINE="
+    --moe-layer-freq ${MOE_LAYER_FREQ}"
     MOE_ARGS_BLOCK="
 MOE_ARGS=(
     --num-experts ${NUM_EXPERTS}
     --moe-router-topk ${MOE_TOPK}
-    --moe-aux-loss-coeff 0.01
+    --moe-aux-loss-coeff ${MOE_AUX_LOSS_COEFF}
     --moe-grouped-gemm
-    --moe-token-dispatcher-type alltoall${_PRESOFTMAX_LINE}${_FFN_LINE}${_SHARED_LINE}
+    --moe-token-dispatcher-type alltoall${_PRESOFTMAX_LINE}${_FFN_LINE}${_SHARED_LINE}${_LAYERFREQ_LINE}
 )"
 else
     MOE_ARGS_BLOCK="
@@ -178,9 +183,9 @@ if [ -n "$WANDB_API_KEY" ]; then
     echo "[$(date)] WANDB enabled."
     TRAINING_CMD="$TRAINING_CMD \
         --wandb-save-dir $LOG_DIR \
-        --wandb-project $PROJECT_NAME \
+        --wandb-project gipfelsturm \
         --wandb-entity LSAIE \
-        --wandb-exp-name $EXP_NAME-$SLURM_JOB_ID"
+        --wandb-exp-name $EXP_NAME-$PROJECT_NAME-$SLURM_JOB_ID"
 else
     export WANDB_MODE=disabled
     echo "[$(date)] WANDB disabled."
@@ -190,9 +195,9 @@ else
 fi
 
 ################ Generate script ################
-mkdir -p logs
+mkdir -p "logs/${PROJECT_NAME}"
 
-SCRIPT="logs/${JOB_NAME}.sbatch"
+SCRIPT="logs/${PROJECT_NAME}/${JOB_NAME}.sbatch"
 
 cat > "$SCRIPT" << 'HEADER'
 #!/bin/bash
@@ -202,8 +207,8 @@ cat >> "$SCRIPT" << SBATCH_DIRECTIVES
 #SBATCH --account=lsaie-ss26
 #SBATCH --time=${TIME}
 #SBATCH --job-name=${JOB_NAME}
-#SBATCH --output=logs/%x-%j.log
-#SBATCH --error=logs/%x-%j.log
+#SBATCH --output=logs/${PROJECT_NAME}/%x-%j.log
+#SBATCH --error=logs/${PROJECT_NAME}/%x-%j.log
 #SBATCH --nodes=${NODES}
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4

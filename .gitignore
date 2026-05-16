@@ -1,3 +1,11 @@
 logs/
 data/climbmix_small/
 .env
+.venv/
+.python-version
+pyproject.toml
+uv.lock
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
