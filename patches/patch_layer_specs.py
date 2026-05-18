@@ -33,9 +33,10 @@ addition = (
 text = text.replace(old_import, old_import + addition, 1)
 
 core_attn_old = 'core_attention=backend.core_attention()'
-if core_attn_old not in text:
+count = text.count(core_attn_old)
+if count == 0:
     sys.exit(f'ERROR: core_attention pattern not found in {path}')
-text = text.replace(core_attn_old, 'core_attention=_CORE_ATTN', 1)
+text = text.replace(core_attn_old, 'core_attention=_CORE_ATTN')  # replace ALL occurrences
 
 open(path, 'w').write(text)
-print(f'Patched {path}')
+print(f'Patched {os.path.abspath(path)} ({count} core_attention replacement(s))')
