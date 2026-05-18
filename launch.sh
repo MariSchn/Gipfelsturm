@@ -222,6 +222,9 @@ mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR
 
 cd $MEGATRON_LM_DIR
 flock $MEGATRON_LM_DIR/.git-lock bash -c "cd $MEGATRON_LM_DIR && git checkout -- . && git clean -f && git apply $WORKDIR/patches/*.patch"
+cp $WORKDIR/patches/linear_attention.py $MEGATRON_LM_DIR/megatron/core/transformer/
+cp $WORKDIR/patches/mamba_attention.py  $MEGATRON_LM_DIR/megatron/core/transformer/
+cp $WORKDIR/patches/xlstm_attention.py  $MEGATRON_LM_DIR/megatron/core/transformer/
 python3 $WORKDIR/patches/patch_layer_specs.py
 export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
 export CUDA_DEVICE_MAX_CONNECTIONS=1
