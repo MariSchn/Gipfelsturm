@@ -246,27 +246,3 @@ new file mode 100644
 +
 +        y = o * c / n.clamp(min=1.0)
 +        return y.reshape(sq, b, np_heads * hn)
-diff --git a/megatron/core/models/gpt/gpt_layer_specs.py b/megatron/core/models/gpt/gpt_layer_specs.py
---- a/megatron/core/models/gpt/gpt_layer_specs.py
-+++ b/megatron/core/models/gpt/gpt_layer_specs.py
-@@ -11,4 +11,13 @@
- )
- from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec_for_backend
- from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
-+import os as _os
-+from megatron.core.transformer.linear_attention import LinearAttentionCore
-+from megatron.core.transformer.mamba_attention import MambaCore
-+from megatron.core.transformer.xlstm_attention import XLSTMCore
-+_CORE_ATTN = {
-+    'linear': LinearAttentionCore,
-+    'mamba':  MambaCore,
-+    'xlstm':  XLSTMCore,
-+}.get(_os.environ.get('ATTN_BACKEND', 'linear'), LinearAttentionCore)
- from megatron.core.transformer.enums import AttnMaskType, LayerType
-@@ -400,5 +408,5 @@
-                     params={"attn_mask_type": AttnMaskType.causal},
-                     submodules=SelfAttentionSubmodules(
-                         linear_qkv=backend.column_parallel_linear(),
--                        core_attention=backend.core_attention(),
-+                        core_attention=_CORE_ATTN,
-                         linear_proj=backend.row_parallel_linear(),
