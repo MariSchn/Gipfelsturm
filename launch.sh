@@ -111,8 +111,12 @@ case $MODEL_SIZE in
         NUM_LAYERS=40; HIDDEN=6144; FFN=24576; HEADS=48; KV_HEADS=8
         MBS=1
         ;;
+    140b)
+        NUM_LAYERS=120; HIDDEN=8192; FFN=40960; HEADS=64; KV_HEADS=8
+        MBS=1
+        ;;
     *)
-        echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b, 32b"
+        echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b, 32b, 140b"
         exit 1
         ;;
 esac
@@ -127,6 +131,14 @@ PP=${PP:-1}
 if [ "${MODEL_SIZE}" = "8b" ] && [ "${TRANSFORMER_IMPL}" = "local" ]; then TP=4; fi
 # 32B always needs TP=4 (too large for single GPU)
 if [ "${MODEL_SIZE}" = "32b" ]; then TP=4; fi
+# 140B needs TP=4 PP=4; also requires 8 nodes (DP=2) for optimizer to fit in 95 GB HBM
+if [ "${MODEL_SIZE}" = "140b" ]; then
+    TP=4; PP=4
+    if [ "${NODES}" -lt 8 ]; then
+        echo "140b: overriding NODES to 8 (DP=1 on 4 nodes OOMs optimizer states)" >&2
+        NODES=8
+    fi
+fi
 
 GBS=256
 SEQ_LEN=4096
