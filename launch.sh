@@ -10,13 +10,16 @@
 # Steps:     required for train mode (e.g., 1000, 5000, 15000)
 # Nodes:     optional, default 4 (max 8)
 #
-# Env vars:  TRANSFORMER_IMPL=local  (default: transformer_engine)
-#            Use 'local' to activate custom attention patches (linear, mamba, xlstm).
-#            The local spec routes through get_gpt_layer_local_spec() in Megatron.
+# Env vars:  TRANSFORMER_IMPL=local   linear attention (kernel trick)
+#            TRANSFORMER_IMPL=mamba   Mamba selective SSM
+#            TRANSFORMER_IMPL=xlstm  xLSTM sLSTM-style gating
+#            (default: transformer_engine — NVIDIA fused softmax baseline)
 #
 # Examples:  ./launch.sh throughput 760m
 #            ./launch.sh throughput 8b 50 1
-#            TRANSFORMER_IMPL=local ./launch.sh throughput 125m 20 1
+#            TRANSFORMER_IMPL=local  ./launch.sh throughput 8b 50 1
+#            TRANSFORMER_IMPL=mamba  ./launch.sh throughput 8b 50 1
+#            TRANSFORMER_IMPL=xlstm  ./launch.sh throughput 8b 50 1
 #            ./launch.sh train 760m 5000
 #            ./launch.sh train 1.5b 3000 8
 
@@ -27,6 +30,14 @@ MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 
 SLURM_PARTITION="${PARTITION:-debug}"
 TRANSFORMER_IMPL="${TRANSFORMER_IMPL:-transformer_engine}"
+
+# mamba/xlstm both use the local transformer impl; set ATTN_BACKEND for runtime selection
+ATTN_BACKEND=""
+case $TRANSFORMER_IMPL in
+    mamba)  ATTN_BACKEND=mamba;  TRANSFORMER_IMPL=local ;;
+    xlstm)  ATTN_BACKEND=xlstm;  TRANSFORMER_IMPL=local ;;
+    local)  ATTN_BACKEND=linear ;;
+esac
 
 ################ Mode config ################
 case $MODE in
@@ -66,7 +77,7 @@ esac
 if [ "${SLURM_PARTITION}" != "debug" ]; then
     case $MODE in
         throughput) TIME=01:30:00 ;;
-        train)      TIME=06:00:00 ;;
+        train)      TIME=12:00:00 ;;
     esac
 fi
 
@@ -119,7 +130,8 @@ if [ "${MODEL_SIZE}" = "32b" ]; then TP=4; fi
 
 GBS=256
 SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
+ATTN_LABEL="${ATTN_BACKEND:+-${ATTN_BACKEND}}"
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n${ATTN_LABEL}"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -209,6 +221,12 @@ MASTER_ADDR=$(hostname)
 MASTER_PORT=25678
 
 SETUP
+
+if [ -n "${ATTN_BACKEND}" ]; then
+cat >> "$SCRIPT" << ATTN_EXPORT
+export ATTN_BACKEND=${ATTN_BACKEND}
+ATTN_EXPORT
+fi
 
 if [ "${TRANSFORMER_IMPL}" = "local" ]; then
 cat >> "$SCRIPT" << 'TE_ARGS'
